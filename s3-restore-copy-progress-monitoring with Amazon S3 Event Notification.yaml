@@ -1,0 +1,2209 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'S3 Restore Copy status monitoring dashboard'
+
+
+Parameters:
+
+  Bucket:
+    Description: Please specify the Monitored Bucket
+    Type: String
+    MinLength: '0'
+    MaxLength: '1024'
+
+  TargetBucket:
+    Description: Please specify the target bucket name if you are copying to a different bucket, leave empty if you copying to the same bucket
+    Type: String
+    MinLength: '0'
+    MaxLength: '1024'  
+
+  ManifestFileBucket:
+    Description: Please specify the bucket where the manifest file is uploaded
+    Type: String
+    MinLength: '0'
+    MaxLength: '1024'
+
+  ManifestFile:
+    Description: Please specify the uploaded manifest file name
+    Type: String
+    MinLength: '0'
+    MaxLength: '1024'
+
+  VersioningEnabled:
+    Description: Please specify if the manifest file contains version IDs
+    Type: String
+    Default: "no"
+    AllowedValues:
+      - "yes"
+      - "no"
+
+
+  QuickSightIdentityRegion:
+    Type: String
+    MinLength: 1
+    Description: Region where QuickSight identity is configured.
+
+  QuickSightUser:
+    Type: String
+    MinLength: 1
+    Description: User name of QuickSight author/admin from default namespace.
+
+  DynamoDBConnectorName:
+    Type: String
+    MinLength: 1
+    Description: DynamoDB Connector Name  
+
+Conditions:
+  versioning_enabled: !Equals [ !Ref VersioningEnabled, "yes" ]
+  versioning_disabled: !Equals [ !Ref VersioningEnabled, "no" ]
+  samebucket: !Equals [ !Ref TargetBucket, ""]
+  notsamebucket: !Not [!Equals [ !Ref TargetBucket, ""]]
+  
+
+
+Resources: 
+
+  NonVersioningDDBTable:
+    Condition: versioning_disabled
+    DeletionPolicy: Delete
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        -
+          AttributeName: "object_key"
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: "object_key"
+          KeyType: "HASH"
+      TableName: !Join
+        - ''
+        - - !Ref Bucket
+          - "-"
+          - !Select
+            - 0
+            - !Split
+              - "-"
+              - !Select
+                - 2
+                - !Split
+                  - "/"
+                  - !Ref "AWS::StackId" 
+      ImportSourceSpecification:
+        InputCompressionType: "NONE"
+        InputFormat: "CSV"
+        InputFormatOptions: 
+          Csv:
+            Delimiter: ","
+            HeaderList: 
+              - "bucket"
+              - "object_key"
+        S3BucketSource:
+          S3Bucket: !Ref ManifestFileBucket
+          S3KeyPrefix: !Ref ManifestFile
+
+
+  VersioningDDBTable:
+    Condition: versioning_enabled
+    DeletionPolicy: Delete
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        -
+          AttributeName: "object_key"
+          AttributeType: "S"
+        -
+          AttributeName: "versionId"
+          AttributeType: "S"
+
+      KeySchema:
+        -
+          AttributeName: "object_key"
+          KeyType: "HASH"
+
+        -
+          AttributeName: "versionId"
+          KeyType: "RANGE"
+
+      TableName: !Join
+        - ''
+        - - !Ref Bucket
+          - "-"
+          - !Select
+            - 0
+            - !Split
+              - "-"
+              - !Select
+                - 2
+                - !Split
+                  - "/"
+                  - !Ref "AWS::StackId" 
+      ImportSourceSpecification:
+        InputCompressionType: "NONE"
+        InputFormat: "CSV"
+        InputFormatOptions: 
+          Csv:
+            Delimiter: ","
+            HeaderList: 
+              - "bucket"
+              - "object_key"
+              - "versionId"
+        S3BucketSource:
+          S3Bucket: !Ref ManifestFileBucket
+          S3KeyPrefix: !Ref ManifestFile
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "dynamodb:BatchGet*"
+                  - "dynamodb:DescribeStream"
+                  - "dynamodb:DescribeTable"
+                  - "dynamodb:Get*"
+                  - "dynamodb:Query"
+                  - "dynamodb:Scan"
+                  - "dynamodb:BatchWrite*"
+                  - "dynamodb:CreateTable"
+                  - "dynamodb:Delete*"
+                  - "dynamodb:Update*"
+                  - "dynamodb:PutItem"
+                Resource:
+                  - !Join
+                    - ''
+                    - - "arn:aws:dynamodb:*:*:table/"
+                      - !Ref Bucket
+                      - '-'
+                      - !Select
+                        - 0
+                        - !Split
+                          - "-"
+                          - !Select
+                            - 2
+                            - !Split
+                              - "/"
+                              - !Ref "AWS::StackId"
+                  - !Join
+                    - ''
+                    - - "arn:aws:dynamodb:*:*:table/"
+                      - !Ref TargetBucket
+                      - '-'
+                      - !Select
+                        - 0
+                        - !Split
+                          - "-"
+                          - !Select
+                            - 2
+                            - !Split
+                              - "/"
+                              - !Ref "AWS::StackId"
+              - Effect: Allow
+                Action:
+                  - 's3:GetBucketNotification'
+                  - 's3:PutBucketNotification'
+                Resource:
+                  # - !Sub 'arn:aws:s3:::${ManifestBucket}'
+                  - !Sub 'arn:aws:s3:::${Bucket}'
+                  - !Sub 'arn:aws:s3:::${TargetBucket}'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+
+
+
+  S3RestoreInitNotif:
+    Type: AWS::Lambda::Function
+    DependsOn: 
+      - LambdaExecutionRole
+    Properties:
+      Description: Custom Resource Lambda that updates DDB when receive restore init notification
+      Environment:
+        Variables:
+          versioned: !Ref VersioningEnabled
+          TableName: !Join
+            - ''
+            - - !Ref Bucket
+              - "-"
+              - !Select
+                - 0
+                - !Split
+                  - "-"
+                  - !Select
+                    - 2
+                    - !Split
+                      - "/"
+                      - !Ref "AWS::StackId" 
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Timeout: 300
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from botocore.exceptions import ClientError
+          import logging
+          import os
+
+          logger = logging.getLogger(__name__)
+
+          print('Loading function')
+
+          s3 = boto3.client('s3')
+          dynamodb = boto3.resource('dynamodb')
+
+          versioned = os.environ['versioned']
+          ddbtable = os.environ['TableName']
+
+          def lambda_handler(event, context):
+            if 'versionId' not in event['Records'][0]['s3']['object'] and versioned == 'no':
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              #version = event['Records'][0]['s3']['object']['versionId']
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              
+            
+              table = dynamodb.Table(ddbtable)
+              
+              get_response = table.get_item(
+                   Key={ 'object_key': object_key },
+                  )
+              if len(get_response) == 1:
+                  print("object does not exist")
+              
+              elif 'object_expired' not in get_response['Item']:
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key },
+                          UpdateExpression="set restore_initiated = :val1, restore_init_time = :val2, size = :val3, restore_comp_time = :val4, copy_comp_time = :val5, restore_duration = :val6, duration_in_std = :val7,restore_completed = :val8, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12",
+                          ExpressionAttributeValues={':val1': "yes", ':val2': eventtime, ':val3': size, ':val4': "null", ':val5': "null", ':val6': 0, ':val7': 0, ':val8': "no", ':val9': "no", ':val10': "no", ':val11': 0, ':val12': "no"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+
+              elif 'object_expired' in get_response['Item'] and get_response['Item']['object_expired'] == 'yes':
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key },
+                          UpdateExpression="set restore_initiated = :val1, restore_init_time = :val2, size = :val3, restore_comp_time = :val4, copy_comp_time = :val5, restore_duration = :val6, duration_in_std = :val7,restore_completed = :val8, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12",
+                          ExpressionAttributeValues={':val1': "yes", ':val2': eventtime, ':val3': size, ':val4': "null", ':val5': "null", ':val6': 0, ':val7': 0, ':val8': "no", ':val9': "no", ':val10': "no", ':val11': 0, ':val12': "no"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+
+              elif 'object_expired' in get_response['Item'] and get_response['Item']['object_accessible'] == 'yes':
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key },
+                          UpdateExpression="set restore_initiated = :val1, copy_comp_time = :val5, restore_duration = :val6, duration_in_std = :val7,restore_completed = :val8, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12",
+                          ExpressionAttributeValues={':val1': "yes", ':val5': "null", ':val6': 0, ':val7': 0, ':val8': "yes", ':val9': "no", ':val10': "yes", ':val11': 0, ':val12': "no"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+
+
+              elif 'object_expired' in get_response['Item'] and get_response['Item']['object_accessible'] == 'no':
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key },
+                          UpdateExpression="set restore_initiated = :val1, restore_init_time = :val2, size = :val3, restore_comp_time = :val4, copy_comp_time = :val5, duration_in_std = :val7, restore_completed = :val8, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12",
+                          ExpressionAttributeValues={':val1': "yes", ':val2': eventtime, ':val3': size, ':val4': "null", ':val5': "null", ':val7': 0, ':val8': "no", ':val9': "no", ':val10': "no", ':val11': 0, ':val12': "no"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")                         
+            
+            elif 'versionId' in event['Records'][0]['s3']['object'] and versioned == 'no':
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              #version = event['Records'][0]['s3']['object']['versionId']
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              
+            
+              table = dynamodb.Table(ddbtable)
+              
+              get_response = table.get_item(
+                   Key={ 'object_key': object_key },
+                  )
+              if len(get_response) == 1:
+                  print("object does not exist")
+              
+              elif 'object_expired' not in get_response['Item']:
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key },
+                          UpdateExpression="set restore_initiated = :val1, restore_init_time = :val2, size = :val3, restore_comp_time = :val4, copy_comp_time = :val5, restore_duration = :val6, duration_in_std = :val7,restore_completed = :val8, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12",
+                          ExpressionAttributeValues={':val1': "yes", ':val2': eventtime, ':val3': size, ':val4': "null", ':val5': "null", ':val6': 0, ':val7': 0, ':val8': "no", ':val9': "no", ':val10': "no", ':val11': 0, ':val12': "no"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+
+              elif 'object_expired' in get_response['Item'] and get_response['Item']['object_expired'] == 'yes':
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key },
+                          UpdateExpression="set restore_initiated = :val1, restore_init_time = :val2, size = :val3, restore_comp_time = :val4, copy_comp_time = :val5, restore_duration = :val6, duration_in_std = :val7,restore_completed = :val8, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12",
+                          ExpressionAttributeValues={':val1': "yes", ':val2': eventtime, ':val3': size, ':val4': "null", ':val5': "null", ':val6': 0, ':val7': 0, ':val8': "no", ':val9': "no", ':val10': "no", ':val11': 0, ':val12': "no"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+
+              elif 'object_expired' in get_response['Item'] and get_response['Item']['object_accessible'] == 'yes':
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key },
+                          UpdateExpression="set restore_initiated = :val1, copy_comp_time = :val5, restore_duration = :val6, duration_in_std = :val7,restore_completed = :val8, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12",
+                          ExpressionAttributeValues={':val1': "yes", ':val5': "null", ':val6': 0, ':val7': 0, ':val8': "yes", ':val9': "no", ':val10': "yes", ':val11': 0, ':val12': "no"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+
+
+              elif 'object_expired' in get_response['Item'] and get_response['Item']['object_accessible'] == 'no':
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key },
+                          UpdateExpression="set restore_initiated = :val1, restore_init_time = :val2, size = :val3, restore_comp_time = :val4, copy_comp_time = :val5, duration_in_std = :val7, restore_completed = :val8, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12",
+                          ExpressionAttributeValues={':val1': "yes", ':val2': eventtime, ':val3': size, ':val4': "null", ':val5': "null", ':val7': 0, ':val8': "no", ':val9': "no", ':val10': "no", ':val11': 0, ':val12': "no"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong") 
+
+            elif 'versionId' not in event['Records'][0]['s3']['object'] and versioned == 'yes':
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              versionId = "null"
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              
+            
+              table = dynamodb.Table(ddbtable)
+              
+              get_response = table.get_item(
+                   Key={ 'object_key': object_key, 'versionId': versionId},
+                  )
+              if len(get_response) == 1:
+                  print("object does not exist")
+              
+              elif 'object_expired' not in get_response['Item']:
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key, 'versionId': versionId},
+                          UpdateExpression="set restore_initiated = :val1, restore_init_time = :val2, size = :val3, restore_comp_time = :val4, copy_comp_time = :val5, restore_duration = :val6, duration_in_std = :val7,restore_completed = :val8, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12, new_copy = :val13",
+                          ExpressionAttributeValues={':val1': "yes", ':val2': eventtime, ':val3': size, ':val4': "null", ':val5': "null", ':val6': 0, ':val7': 0, ':val8': "no", ':val9': "no", ':val10': "no", ':val11': 0, ':val12': "no", ':val13': "no"},
+                          ConditionExpression='attribute_exists(object_key) and attribute_exists(versionId)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+              
+              elif 'object_expired' in get_response['Item'] and get_response['Item']['object_expired'] == 'yes':
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key, 'versionId': versionId},
+                          UpdateExpression="set restore_initiated = :val1, restore_init_time = :val2, size = :val3, restore_comp_time = :val4, copy_comp_time = :val5, restore_duration = :val6, duration_in_std = :val7,restore_completed = :val8, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12, new_copy = :val13",
+                          ExpressionAttributeValues={':val1': "yes", ':val2': eventtime, ':val3': size, ':val4': "null", ':val5': "null", ':val6': 0, ':val7': 0, ':val8': "no", ':val9': "no", ':val10': "no", ':val11': 0, ':val12': "no", ':val13': "no"},
+                          ConditionExpression='attribute_exists(object_key) and attribute_exists(versionId)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+              
+              elif 'object_expired' in get_response['Item'] and get_response['Item']['object_expired'] == 'no':
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key, 'versionId': versionId},
+                          UpdateExpression="set restore_initiated = :val1, restore_init_time = :val2, size = :val3, copy_comp_time = :val5, duration_in_std = :val7, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12, new_copy = :val13",
+                          ExpressionAttributeValues={':val1': "yes", ':val2': eventtime, ':val3': size, ':val5': "null", ':val7': 0, ':val8': "no", ':val9': "no", ':val10': "yes", ':val11': 0, ':val12': "no", ':val13': "no"},
+                          ConditionExpression='attribute_exists(object_key) and attribute_exists(versionId)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong") 
+
+            elif 'versionId' in event['Records'][0]['s3']['object'] and versioned == 'yes':
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              versionId = event['Records'][0]['s3']['object']['versionId']
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              
+            
+              table = dynamodb.Table(ddbtable)
+              
+              get_response = table.get_item(
+                   Key={ 'object_key': object_key, 'versionId': versionId},
+                  )
+              if len(get_response) == 1:
+                  print("object does not exist")
+              
+              elif 'object_expired' not in get_response['Item']:
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key, 'versionId': versionId},
+                          UpdateExpression="set restore_initiated = :val1, restore_init_time = :val2, size = :val3, restore_comp_time = :val4, copy_comp_time = :val5, restore_duration = :val6, duration_in_std = :val7,restore_completed = :val8, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12, new_copy = :val13",
+                          ExpressionAttributeValues={':val1': "yes", ':val2': eventtime, ':val3': size, ':val4': "null", ':val5': "null", ':val6': 0, ':val7': 0, ':val8': "no", ':val9': "no", ':val10': "no", ':val11': 0, ':val12': "no", ':val13': "no"},
+                          ConditionExpression='attribute_exists(object_key) and attribute_exists(versionId)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+              
+              elif 'object_expired' in get_response['Item'] and get_response['Item']['object_expired'] == 'yes':
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key, 'versionId': versionId},
+                          UpdateExpression="set restore_initiated = :val1, restore_init_time = :val2, size = :val3, restore_comp_time = :val4, copy_comp_time = :val5, restore_duration = :val6, duration_in_std = :val7,restore_completed = :val8, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12, new_copy = :val13",
+                          ExpressionAttributeValues={':val1': "yes", ':val2': eventtime, ':val3': size, ':val4': "null", ':val5': "null", ':val6': 0, ':val7': 0, ':val8': "no", ':val9': "no", ':val10': "no", ':val11': 0, ':val12': "no", ':val13': "no"},
+                          ConditionExpression='attribute_exists(object_key) and attribute_exists(versionId)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+              
+              elif 'object_expired' in get_response['Item'] and get_response['Item']['object_expired'] == 'no':
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key, 'versionId': versionId},
+                          UpdateExpression="set restore_initiated = :val1, restore_init_time = :val2, size = :val3, copy_comp_time = :val5, duration_in_std = :val7, copy_completed = :val9, object_accessible = :val10, expiration_duration = :val11, object_expired = :val12, new_copy = :val13",
+                          ExpressionAttributeValues={':val1': "yes", ':val2': eventtime, ':val3': size, ':val5': "null", ':val7': 0, ':val8': "no", ':val9': "no", ':val10': "yes", ':val11': 0, ':val12': "no", ':val13': "no"},
+                          ConditionExpression='attribute_exists(object_key) and attribute_exists(versionId)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")                           
+
+
+
+  S3RestoreCompNotif:
+    Type: AWS::Lambda::Function
+    DependsOn: 
+      - LambdaExecutionRole
+    Properties:
+      Description: Custom Resource Lambda that updates DDB when receive restore completion notification
+      Environment:
+        Variables:
+          versioned: !Ref VersioningEnabled
+          TableName: !Join
+            - ''
+            - - !Ref Bucket
+              - "-"
+              - !Select
+                - 0
+                - !Split
+                  - "-"
+                  - !Select
+                    - 2
+                    - !Split
+                      - "/"
+                      - !Ref "AWS::StackId"    
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Timeout: 300
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import datetime
+          from boto3.dynamodb.conditions import Key, Attr
+          from botocore.exceptions import ClientError
+          import logging
+          import os
+
+          dynamodb = boto3.resource('dynamodb')
+
+          logger = logging.getLogger(__name__)
+
+          print('Loading function')
+
+          versioned = os.environ['versioned']
+          ddbtable = os.environ['TableName']
+
+          def lambda_handler(event, context):
+            if 'versionId' not in event['Records'][0]['s3']['object'] and versioned == 'no':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              #version = event['Records'][0]['s3']['object']['versionId']
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                  Key={ 'object_key': object_key },
+                  )
+                  
+              if len(get_response) == 1:
+                  print("object does not exist")
+              else:
+                  restore_starttime = datetime.datetime.strptime(get_response['Item']['restore_init_time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  restore_finishtime = datetime.datetime.strptime(eventtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                  restore_delta = restore_finishtime - restore_starttime
+                  restore_duration = restore_delta.total_seconds()/60
+
+              try:
+                  update_response =  table.update_item(
+                      Key={ 'object_key': object_key },
+                      UpdateExpression="set restore_completed = :s, restore_comp_time = :c, restore_duration = :e, object_accessible = :val1",
+                      ExpressionAttributeValues={':s': "yes", ':c': eventtime, ':e': int(restore_duration), ':val1': "yes"},
+                      ConditionExpression='attribute_exists(object_key)',
+                      ReturnValues="UPDATED_NEW")
+              except ClientError as err:
+                  logger.warning(
+                      "something went wrong")
+
+            elif 'versionId' in event['Records'][0]['s3']['object'] and versioned == 'no':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              #version = event['Records'][0]['s3']['object']['versionId']
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                  Key={ 'object_key': object_key },
+                  )
+                  
+              if len(get_response) == 1:
+                  print("object does not exist")
+              else:
+                  restore_starttime = datetime.datetime.strptime(get_response['Item']['restore_init_time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  restore_finishtime = datetime.datetime.strptime(eventtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                  restore_delta = restore_finishtime - restore_starttime
+                  restore_duration = restore_delta.total_seconds()/60
+
+              try:
+                  update_response =  table.update_item(
+                      Key={ 'object_key': object_key },
+                      UpdateExpression="set restore_completed = :s, restore_comp_time = :c, restore_duration = :e, object_accessible = :val1",
+                      ExpressionAttributeValues={':s': "yes", ':c': eventtime, ':e': int(restore_duration), ':val1': "yes"},
+                      ConditionExpression='attribute_exists(object_key)',
+                      ReturnValues="UPDATED_NEW")
+              except ClientError as err:
+                  logger.warning(
+                      "something went wrong")
+
+            elif 'versionId' not in event['Records'][0]['s3']['object'] and versioned == 'yes':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              versionId = "null"
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                  Key={ 'object_key': object_key, 'versionId': versionId},
+                  )
+                  
+              if len(get_response) == 1:
+                  print("object does not exist")
+              else:
+                  restore_starttime = datetime.datetime.strptime(get_response['Item']['restore_init_time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  restore_finishtime = datetime.datetime.strptime(eventtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                  restore_delta = restore_finishtime - restore_starttime
+                  restore_duration = restore_delta.total_seconds()/60
+
+              try:
+                  update_response =  table.update_item(
+                      Key={ 'object_key': object_key, 'versionId': versionId},
+                      UpdateExpression="set restore_completed = :s, restore_comp_time = :c, restore_duration = :e, object_accessible = :val1",
+                      ExpressionAttributeValues={':s': "yes", ':c': eventtime, ':e': int(restore_duration), ':val1': "yes"},
+                      ConditionExpression='attribute_exists(object_key) and attribute_exists(versionId)',
+                      ReturnValues="UPDATED_NEW")
+              except ClientError as err:
+                  logger.warning(
+                      "something went wrong")
+
+            elif 'versionId' in event['Records'][0]['s3']['object'] and versioned == 'yes':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              versionId = event['Records'][0]['s3']['object']['versionId']
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                  Key={ 'object_key': object_key, 'versionId': versionId},
+                  )
+                  
+              if len(get_response) == 1:
+                  print("object does not exist")
+              else:
+                  restore_starttime = datetime.datetime.strptime(get_response['Item']['restore_init_time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  restore_finishtime = datetime.datetime.strptime(eventtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                  restore_delta = restore_finishtime - restore_starttime
+                  restore_duration = restore_delta.total_seconds()/60
+
+              try:
+                  update_response =  table.update_item(
+                      Key={ 'object_key': object_key, 'versionId': versionId},
+                      UpdateExpression="set restore_completed = :s, restore_comp_time = :c, restore_duration = :e, object_accessible = :val1",
+                      ExpressionAttributeValues={':s': "yes", ':c': eventtime, ':e': int(restore_duration), ':val1': "yes"},
+                      ConditionExpression='attribute_exists(object_key) and attribute_exists(versionId)',
+                      ReturnValues="UPDATED_NEW")
+              except ClientError as err:
+                  logger.warning(
+                      "something went wrong")
+
+  S3RestoreExpNotif:
+    Type: AWS::Lambda::Function
+    DependsOn: 
+      - LambdaExecutionRole
+    Properties:
+      Description: Custom Resource Lambda that updates DDB when receive restore completion notification
+      Environment:
+        Variables:
+          versioned: !Ref VersioningEnabled
+          TableName: !Join
+            - ''
+            - - !Ref Bucket
+              - "-"
+              - !Select
+                - 0
+                - !Split
+                  - "-"
+                  - !Select
+                    - 2
+                    - !Split
+                      - "/"
+                      - !Ref "AWS::StackId" 
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Timeout: 300
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import datetime
+          from boto3.dynamodb.conditions import Key, Attr
+          from botocore.exceptions import ClientError
+          import logging
+          import os
+
+          dynamodb = boto3.resource('dynamodb')
+          logger = logging.getLogger(__name__)
+          print('Loading function')
+          versioned = os.environ['versioned']
+          ddbtable = os.environ['TableName']
+
+
+          def lambda_handler(event, context):
+            if 'versionId' not in event['Records'][0]['s3']['object'] and versioned == 'no':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              #size = event['Records'][0]['s3']['object']['size']
+              #version = event['Records'][0]['s3']['object']['versionId']
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                  Key={ 'object_key': object_key },
+                  )
+                  
+              if len(get_response) == 1:
+                  print("object does not exist")
+              else:
+                  restore_finishtime = datetime.datetime.strptime(get_response['Item']['restore_init_time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  expiration_time = datetime.datetime.strptime(eventtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                  expiration_delta = expiration_time - restore_finishtime
+                  expiration_duration = expiration_delta.total_seconds()/60/60
+
+              try:
+                  update_response =  table.update_item(
+                      Key={ 'object_key': object_key },
+                      UpdateExpression="set object_accessible = :val1, expiration_time = :val2, expiration_duration = :val3, object_expired = :val4",
+                      ExpressionAttributeValues={':val1': "no", ':val2': eventtime, ':val3': int(expiration_duration), ':val4': "yes"},
+                      ConditionExpression='attribute_exists(object_key)',
+                      ReturnValues="UPDATED_NEW")
+              except ClientError as err:
+                  logger.warning(
+                      "something went wrong")
+            
+            elif 'versionId' in event['Records'][0]['s3']['object'] and versioned == 'no':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              #size = event['Records'][0]['s3']['object']['size']
+              #version = event['Records'][0]['s3']['object']['versionId']
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                  Key={ 'object_key': object_key },
+                  )
+                  
+              if len(get_response) == 1:
+                  print("object does not exist")
+              else:
+                  restore_finishtime = datetime.datetime.strptime(get_response['Item']['restore_init_time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  expiration_time = datetime.datetime.strptime(eventtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                  expiration_delta = expiration_time - restore_finishtime
+                  expiration_duration = expiration_delta.total_seconds()/60/60
+
+              try:
+                  update_response =  table.update_item(
+                      Key={ 'object_key': object_key },
+                      UpdateExpression="set object_accessible = :val1, expiration_time = :val2, expiration_duration = :val3, object_expired = :val4",
+                      ExpressionAttributeValues={':val1': "no", ':val2': eventtime, ':val3': int(expiration_duration), ':val4': "yes"},
+                      ConditionExpression='attribute_exists(object_key)',
+                      ReturnValues="UPDATED_NEW")
+              except ClientError as err:
+                  logger.warning(
+                      "something went wrong")
+
+            elif 'versionId' not in event['Records'][0]['s3']['object'] and versioned == 'yes':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              #size = event['Records'][0]['s3']['object']['size']
+              versionId = "null"
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                  Key={ 'object_key': object_key, 'versionId': versionId},
+                  )
+                  
+              if len(get_response) == 1:
+                  print("object does not exist")
+              else:
+                  restore_finishtime = datetime.datetime.strptime(get_response['Item']['restore_init_time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  expiration_time = datetime.datetime.strptime(eventtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                  expiration_delta = expiration_time - restore_finishtime
+                  expiration_duration = expiration_delta.total_seconds()/60/60
+
+              try:
+                  update_response =  table.update_item(
+                      Key={ 'object_key': object_key, 'versionId': versionId },
+                      UpdateExpression="set object_accessible = :val1, expiration_time = :val2, expiration_duration = :val3, object_expired = :val4",
+                      ExpressionAttributeValues={':val1': "no", ':val2': eventtime, ':val3': int(expiration_duration), ':val4': "yes"},
+                      ConditionExpression='attribute_exists(object_key) and attribute_exists(versionId)',
+                      ReturnValues="UPDATED_NEW")
+              except ClientError as err:
+                  logger.warning(
+                      "something went wrong")
+
+            elif 'versionId' in event['Records'][0]['s3']['object'] and versioned == 'yes':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              #size = event['Records'][0]['s3']['object']['size']
+              versionId = event['Records'][0]['s3']['object']['versionId']
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                  Key={ 'object_key': object_key, 'versionId': versionId},
+                  )
+                  
+              if len(get_response) == 1:
+                  print("object does not exist")
+              else:
+                  restore_finishtime = datetime.datetime.strptime(get_response['Item']['restore_init_time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  expiration_time = datetime.datetime.strptime(eventtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                  expiration_delta = expiration_time - restore_finishtime
+                  expiration_duration = expiration_delta.total_seconds()/60/60
+
+              try:
+                  update_response =  table.update_item(
+                      Key={ 'object_key': object_key, 'versionId': versionId },
+                      UpdateExpression="set object_accessible = :val1, expiration_time = :val2, expiration_duration = :val3, object_expired = :val4",
+                      ExpressionAttributeValues={':val1': "no", ':val2': eventtime, ':val3': int(expiration_duration), ':val4': "yes"},
+                      ConditionExpression='attribute_exists(object_key) and attribute_exists(versionId)',
+                      ReturnValues="UPDATED_NEW")
+              except ClientError as err:
+                  logger.warning(
+                      "something went wrong")
+
+# same bucket copy completion notification
+  S3CopyCompNotifSameBucket:
+    Condition: samebucket
+    Type: AWS::Lambda::Function
+    DependsOn: 
+      - LambdaExecutionRole
+    Properties:
+      Description: Custom Resource Lambda that updates DDB when receive copy completion notification
+      Environment:
+        Variables:
+          versioned: !Ref VersioningEnabled
+          TableName: !Join
+            - ''
+            - - !Ref Bucket
+              - "-"
+              - !Select
+                - 0
+                - !Split
+                  - "-"
+                  - !Select
+                    - 2
+                    - !Split
+                      - "/"
+                      - !Ref "AWS::StackId"  
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Timeout: 300
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import datetime
+          from boto3.dynamodb.conditions import Key, Attr
+          from botocore.exceptions import ClientError
+          import logging
+          import os
+
+          dynamodb = boto3.resource('dynamodb')
+
+          logger = logging.getLogger(__name__)
+
+          print('Loading function')
+
+          print(datetime.datetime.utcnow())
+
+          versioned = os.environ['versioned']
+          ddbtable = os.environ['TableName']          
+
+          def lambda_handler(event, context):
+            if 'versionId' not in event['Records'][0]['s3']['object'] and versioned == 'no':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              #version = event['Records'][0]['s3']['object']['versionId']
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                   Key={ 'object_key': object_key },
+                  )
+
+              if len(get_response) == 1:
+                  print("object does not exist")
+              else:
+
+                  copy_starttime = datetime.datetime.strptime(eventtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                  copy_finishtime = datetime.datetime.utcnow()
+                  
+                  restore_finishtime = datetime.datetime.strptime(get_response['Item']['restore_comp_time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  copy_restore_delta = copy_starttime - restore_finishtime
+                  duration_in_std = copy_restore_delta.total_seconds()/60
+              
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key },
+                          UpdateExpression="set copy_initiated = :s, copy_completed = :cm, copy_comp_time = :cc, duration_in_std = :ds, object_accessible = :val1",
+                          ExpressionAttributeValues={':s': "yes", ':cm': "yes",':cc': eventtime, ':ds': int(duration_in_std), ':val1': "no"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+
+            elif 'versionId' in event['Records'][0]['s3']['object'] and versioned == 'no':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              #version = event['Records'][0]['s3']['object']['versionId']
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                   Key={ 'object_key': object_key },
+                  )
+
+              if len(get_response) == 1:
+                  print("object does not exist")
+              else:
+
+                  copy_starttime = datetime.datetime.strptime(eventtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                  copy_finishtime = datetime.datetime.utcnow()
+                  
+                  restore_finishtime = datetime.datetime.strptime(get_response['Item']['restore_comp_time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  copy_restore_delta = copy_starttime - restore_finishtime
+                  duration_in_std = copy_restore_delta.total_seconds()/60
+              
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key },
+                          UpdateExpression="set copy_initiated = :s, copy_completed = :cm, copy_comp_time = :cc, duration_in_std = :ds, object_accessible = :val1",
+                          ExpressionAttributeValues={':s': "yes", ':cm': "yes",':cc': eventtime, ':ds': int(duration_in_std), ':val1': "no"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")                          
+
+            elif 'versionId' not in event['Records'][0]['s3']['object'] and versioned == 'yes':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              #bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              versionId = "null"
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                   Key={ 'object_key': object_key, 'versionId': versionId},
+                  )
+
+              response = table.query(
+                KeyConditionExpression=Key('object_key').eq(object_key)
+              )
+              
+              if len(response['Items']) > 0:
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key , 'versionId': versionId},
+                          UpdateExpression="set copy_initiated = :s, copy_completed = :cm, copy_comp_time = :cc, object_accessible = :val1, new_copy = :val2",
+                          ExpressionAttributeValues={':s': "yes", ':cm': "yes",':cc': eventtime, ':val1': "yes", ':val2': "yes"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")  
+
+
+              #     try:
+              #         update_response =  table.put_item(
+              #             Item={ 'bucket': bucket, 'object_key': object_key, 'versionId': versionId, 'new_copy': "yes", 'copy_completed': "yes", 'copy_comp_time': eventtime}
+              #             )
+              #     except ClientError as err:
+              #         logger.warning(
+              #             "something went wrong")
+              # else:
+              #     print("object created out of scope")
+
+            elif 'versionId' in event['Records'][0]['s3']['object'] and versioned == 'yes':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              versionId = event['Records'][0]['s3']['object']['versionId']
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                   Key={ 'object_key': object_key, 'versionId': versionId},
+                  )
+
+              response = table.query(
+                KeyConditionExpression=Key('object_key').eq(object_key)
+              )
+              
+              if len(response['Items']) > 0:
+                  try:
+                      update_response =  table.put_item(
+                          Item={ 'bucket': bucket, 'object_key': object_key, 'versionId': versionId, 'new_copy': "yes", 'copy_completed': "yes", 'copy_comp_time': eventtime}
+                          )
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+              else:
+                  print("object created out of scope")
+
+
+# not same bucket copy completion notification
+  S3CopyCompNotifNotSameBucket:
+    Condition: notsamebucket
+    Type: AWS::Lambda::Function
+    DependsOn: 
+      - LambdaExecutionRole
+    Properties:
+      Description: Custom Resource Lambda that updates DDB when receive copy completion notification
+      Environment:
+        Variables:
+          versioned: !Ref VersioningEnabled
+          TableName: !Join
+            - ''
+            - - !Ref Bucket
+              - "-"
+              - !Select
+                - 0
+                - !Split
+                  - "-"
+                  - !Select
+                    - 2
+                    - !Split
+                      - "/"
+                      - !Ref "AWS::StackId"     
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Timeout: 300
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import datetime
+          from boto3.dynamodb.conditions import Key, Attr
+          from botocore.exceptions import ClientError
+          import logging
+          import os
+
+          dynamodb = boto3.resource('dynamodb')
+
+          logger = logging.getLogger(__name__)
+
+          print('Loading function')
+
+          print(datetime.datetime.utcnow())
+
+          versioned = os.environ['versioned']
+          ddbtable = os.environ['TableName']
+
+          def lambda_handler(event, context):
+            if 'versionId' not in event['Records'][0]['s3']['object'] and versioned == 'no':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              #bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              #version = event['Records'][0]['s3']['object']['versionId']
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                   Key={ 'object_key': object_key },
+                  )
+
+              if len(get_response) == 1:
+                  print("object does not exist")
+              else:
+
+                  copy_starttime = datetime.datetime.strptime(eventtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                  copy_finishtime = datetime.datetime.utcnow()
+                  
+                  restore_finishtime = datetime.datetime.strptime(get_response['Item']['restore_comp_time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  copy_restore_delta = copy_starttime - restore_finishtime
+                  duration_in_std = copy_restore_delta.total_seconds()/60
+              
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key },
+                          UpdateExpression="set copy_initiated = :s, copy_completed = :cm, copy_comp_time = :cc, duration_in_std = :ds, object_accessible = :val1",
+                          ExpressionAttributeValues={':s': "yes", ':cm': "yes",':cc': eventtime, ':ds': int(duration_in_std), ':val1': "yes"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+
+            elif 'versionId' in event['Records'][0]['s3']['object'] and versioned == 'no':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              #version = event['Records'][0]['s3']['object']['versionId']
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                   Key={ 'object_key': object_key },
+                  )
+
+              if len(get_response) == 1:
+                  print("object does not exist")
+              else:
+
+                  copy_starttime = datetime.datetime.strptime(eventtime, '%Y-%m-%dT%H:%M:%S.%fZ')
+                  copy_finishtime = datetime.datetime.utcnow()
+                  
+                  restore_finishtime = datetime.datetime.strptime(get_response['Item']['restore_comp_time'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  copy_restore_delta = copy_starttime - restore_finishtime
+                  duration_in_std = copy_restore_delta.total_seconds()/60
+              
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key },
+                          UpdateExpression="set copy_initiated = :s, copy_completed = :cm, copy_comp_time = :cc, duration_in_std = :ds, object_accessible = :val1",
+                          ExpressionAttributeValues={':s': "yes", ':cm': "yes",':cc': eventtime, ':ds': int(duration_in_std), ':val1': "yes"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")                          
+ 
+            elif 'versionId' not in event['Records'][0]['s3']['object'] and versioned == 'yes':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              #bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              versionId = "null"
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                   Key={ 'object_key': object_key, 'versionId': versionId},
+                  )
+
+              response = table.query(
+                KeyConditionExpression=Key('object_key').eq(object_key)
+              )
+              
+              if len(response['Items']) > 0:
+                  try:
+                      update_response =  table.update_item(
+                          Key={ 'object_key': object_key , 'versionId': versionId},
+                          UpdateExpression="set copy_initiated = :s, copy_completed = :cm, copy_comp_time = :cc, object_accessible = :val1, new_copy = :val2",
+                          ExpressionAttributeValues={':s': "yes", ':cm': "yes",':cc': eventtime, ':val1': "yes", ':val2': "yes"},
+                          ConditionExpression='attribute_exists(object_key)',
+                          ReturnValues="UPDATED_NEW")
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")  
+
+
+              #     try:
+              #         update_response =  table.put_item(
+              #             Item={ 'bucket': bucket, 'object_key': object_key, 'versionId': versionId, 'new_copy': "yes", 'copy_completed': "yes", 'copy_comp_time': eventtime}
+              #             )
+              #     except ClientError as err:
+              #         logger.warning(
+              #             "something went wrong")
+              # else:
+              #     print("object created out of scope")
+
+            elif 'versionId' in event['Records'][0]['s3']['object'] and versioned == 'yes':
+              eventtime = event['Records'][0]['eventTime']
+              eventtype = event['Records'][0]['eventName']
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              object_key = event['Records'][0]['s3']['object']['key']
+              size = event['Records'][0]['s3']['object']['size']
+              versionId = event['Records'][0]['s3']['object']['versionId']
+              table = dynamodb.Table(ddbtable)
+
+              get_response = table.get_item(
+                   Key={ 'object_key': object_key, 'versionId': versionId},
+                  )
+
+              response = table.query(
+                KeyConditionExpression=Key('object_key').eq(object_key)
+              )
+              
+              if len(response['Items']) > 0:
+                  try:
+                      update_response =  table.put_item(
+                          Item={ 'bucket': bucket, 'object_key': object_key, 'versionId': versionId, 'new_copy': "yes", 'copy_completed': "yes", 'copy_comp_time': eventtime}
+                          )
+                  except ClientError as err:
+                      logger.warning(
+                          "something went wrong")
+              else:
+                  print("object created out of scope")
+
+  LambdaInvokePermission1:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt S3RestoreExpNotif.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub 'arn:aws:s3:::${Bucket}'
+
+
+
+  LambdaInvokePermission2:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt S3RestoreInitNotif.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub 'arn:aws:s3:::${Bucket}'
+
+  LambdaInvokePermission3:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt S3RestoreCompNotif.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub 'arn:aws:s3:::${Bucket}'
+
+  LambdaInvokePermission4SameBucket:
+    Condition: samebucket
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt S3CopyCompNotifSameBucket.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub 'arn:aws:s3:::${Bucket}'
+
+  LambdaInvokePermission4NotSameBucket:
+    Condition: notsamebucket
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt S3CopyCompNotifNotSameBucket.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub 'arn:aws:s3:::${TargetBucket}'
+
+  S3PushEventNotificationIAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetBucketNotification'
+                  - 's3:PutBucketNotification'
+                Resource:
+                  # - !Sub 'arn:aws:s3:::${ManifestBucket}'
+                  - !Sub 'arn:aws:s3:::${Bucket}'
+                  - !Sub 'arn:aws:s3:::${TargetBucket}'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+ 
+
+#same bucket notification  
+  S3PushEventNotificationSameBucket:
+    Condition: samebucket
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt S3PushEventNotificationIAMRole.Arn
+      Code:
+        ZipFile: |
+
+            from __future__ import print_function
+            import json
+            import boto3
+            import cfnresponse
+            
+            SUCCESS = "SUCCESS"
+            FAILED = "FAILED"
+            
+            print('Loading function')
+            s3 = boto3.resource('s3')
+            
+            def lambda_handler(event, context):
+                print("Received event: " + json.dumps(event, indent=2))
+                responseData={}
+                try:
+                    if event['RequestType'] == 'Delete':
+                        print("Request Type:",event['RequestType'])
+                        Bucket=event['ResourceProperties']['Bucket']
+                        delete_notification(Bucket)
+                        print("Sending response to custom resource after Delete")
+                    elif event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                        print("Request Type:",event['RequestType'])
+                        LambdaArn1=event['ResourceProperties']['LambdaArn1']
+                        LambdaArn2=event['ResourceProperties']['LambdaArn2']
+                        LambdaArn3=event['ResourceProperties']['LambdaArn3']
+                        LambdaArn4=event['ResourceProperties']['LambdaArn4']
+                        Bucket=event['ResourceProperties']['Bucket']
+                        # ManifestBucket=event['ResourceProperties']['ManifestBucket']
+                        add_notification(LambdaArn1, LambdaArn2, LambdaArn3, LambdaArn4, Bucket)
+                        # add_notification1(LambdaArn1, ManifestBucket)
+                        responseData={'Bucket':Bucket}
+                        print("Sending response to custom resource")
+                    responseStatus = 'SUCCESS'
+                except Exception as e:
+                    print('Failed to process:', e)
+                    responseStatus = 'FAILED'
+                    responseData = {'Failure': 'Something bad happened.'}
+                cfnresponse.send(event, context, responseStatus, responseData, "CustomResourcePhysicalID")
+
+            def add_notification(LambdaArn1, LambdaArn2, LambdaArn3, LambdaArn4,Bucket):
+                bucket_notification = s3.BucketNotification(Bucket)
+                response = bucket_notification.put(
+                  NotificationConfiguration={
+                    'LambdaFunctionConfigurations': [
+                      {
+                          'LambdaFunctionArn': LambdaArn1,
+                          'Events': [
+                              's3:ObjectRestore:Delete'
+                          ]
+                      },
+                      {
+                          'LambdaFunctionArn': LambdaArn2,
+                          'Events': [
+                              's3:ObjectRestore:Post'
+                          ]
+                      },
+                      {
+                          'LambdaFunctionArn': LambdaArn3,
+                          'Events': [
+                              's3:ObjectRestore:Completed'
+                          ]
+                      },
+                      {
+                          'LambdaFunctionArn': LambdaArn4,
+                          'Events': [
+                              's3:ObjectCreated:Copy',
+                              's3:ObjectCreated:CompleteMultipartUpload'
+                          ]
+                      },
+                    ]
+                  }
+                )
+                print("Put request completed....")  
+              
+            def delete_notification(Bucket):
+                bucket_notification = s3.BucketNotification(Bucket)
+                response = bucket_notification.put(
+                    NotificationConfiguration={}
+                )
+                print("Delete request completed....")
+      Runtime: python3.9
+      Timeout: 50
+
+# not same bucket notification
+  S3PushEventNotificationNotSameBucket:
+    Condition: notsamebucket
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt S3PushEventNotificationIAMRole.Arn
+      Code:
+        ZipFile: |
+
+            from __future__ import print_function
+            import json
+            import boto3
+            import cfnresponse
+            
+            SUCCESS = "SUCCESS"
+            FAILED = "FAILED"
+            
+            print('Loading function')
+            s3 = boto3.resource('s3')
+            
+            def lambda_handler(event, context):
+                print("Received event: " + json.dumps(event, indent=2))
+                responseData1={}
+                responseData2={}
+                try:
+                    if event['RequestType'] == 'Delete':
+                        print("Request Type:",event['RequestType'])
+                        Bucket=event['ResourceProperties']['Bucket']
+                        TargetBucket=event['ResourceProperties']['TargetBucket']
+                        delete_notification1(Bucket)
+                        delete_notification2(TargetBucket)
+                        print("Sending response to custom resource after Delete")
+                    elif event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                        print("Request Type:",event['RequestType'])
+                        LambdaArn1=event['ResourceProperties']['LambdaArn1']
+                        LambdaArn2=event['ResourceProperties']['LambdaArn2']
+                        LambdaArn3=event['ResourceProperties']['LambdaArn3']
+                        LambdaArn4=event['ResourceProperties']['LambdaArn4']
+                        Bucket=event['ResourceProperties']['Bucket']
+                        TargetBucket=event['ResourceProperties']['TargetBucket']
+                        # ManifestBucket=event['ResourceProperties']['ManifestBucket']
+                        add_notification1(LambdaArn1, LambdaArn2, LambdaArn3, Bucket)
+                        add_notification2(LambdaArn4, TargetBucket)
+                        responseData1={'Bucket':Bucket}
+                        responseData2={'Bucket':TargetBucket}
+                        print("Sending response to custom resource")
+                    responseStatus = 'SUCCESS'
+                except Exception as e:
+                    print('Failed to process:', e)
+                    responseStatus = 'FAILED'
+                    responseData1 = {'Failure': 'Something bad happened.'}
+                    responseData2 = {'Failure': 'Something bad happened.'}
+                cfnresponse.send(event, context, responseStatus, responseData1, "CustomResourcePhysicalID")
+                cfnresponse.send(event, context, responseStatus, responseData2, "CustomResourcePhysicalID")
+
+            def add_notification1(LambdaArn1, LambdaArn2, LambdaArn3,Bucket):
+                bucket_notification = s3.BucketNotification(Bucket)
+                response = bucket_notification.put(
+                  NotificationConfiguration={
+                    'LambdaFunctionConfigurations': [
+                      {
+                          'LambdaFunctionArn': LambdaArn1,
+                          'Events': [
+                              's3:ObjectRestore:Delete'
+                          ]
+                      },
+                      {
+                          'LambdaFunctionArn': LambdaArn2,
+                          'Events': [
+                              's3:ObjectRestore:Post'
+                          ]
+                      },
+                      {
+                          'LambdaFunctionArn': LambdaArn3,
+                          'Events': [
+                              's3:ObjectRestore:Completed'
+                          ]
+                      },
+                    ]
+                  }
+                )
+                print("Put request completed....")
+
+            def add_notification2(LambdaArn4,TargetBucket):
+                bucket_notification = s3.BucketNotification(TargetBucket)
+                response = bucket_notification.put(
+                  NotificationConfiguration={
+                    'LambdaFunctionConfigurations': [
+                      {
+                          'LambdaFunctionArn': LambdaArn4,
+                          'Events': [
+                              's3:ObjectCreated:Copy',
+                              's3:ObjectCreated:CompleteMultipartUpload'
+                          ]
+                      },
+                    ]
+                  }
+                )
+                print("Put request completed....")    
+              
+            def delete_notification1(Bucket):
+                bucket_notification = s3.BucketNotification(Bucket)
+                response = bucket_notification.put(
+                    NotificationConfiguration={}
+                )
+                print("Delete request completed....")
+
+            def delete_notification2(TargetBucket):
+                bucket_notification = s3.BucketNotification(TargetBucket)
+                response = bucket_notification.put(
+                    NotificationConfiguration={}
+                )
+                print("Delete request completed....")            
+
+
+      Runtime: python3.9
+      Timeout: 50
+
+#same bucket lambda trigger
+  LambdaTriggerSameBucket:
+    Condition: samebucket
+    Type: 'Custom::LambdaTrigger'
+    DependsOn: 
+      - LambdaInvokePermission1
+      - LambdaInvokePermission2
+      - LambdaInvokePermission3
+      - LambdaInvokePermission4SameBucket
+    Properties:
+      ServiceToken: !GetAtt S3PushEventNotificationSameBucket.Arn
+      LambdaArn1: !GetAtt S3RestoreExpNotif.Arn
+      LambdaArn2: !GetAtt S3RestoreInitNotif.Arn
+      LambdaArn3: !GetAtt S3RestoreCompNotif.Arn
+      LambdaArn4: !GetAtt S3CopyCompNotifSameBucket.Arn
+      Bucket: !Ref Bucket
+      # ManifestBucket: !Ref ManifestBucket
+
+#not same bucket lambda trigger
+  LambdaTriggerNotSameBucket:
+    Condition: notsamebucket
+    Type: 'Custom::LambdaTrigger'
+    DependsOn: 
+      - LambdaInvokePermission1
+      - LambdaInvokePermission2
+      - LambdaInvokePermission3
+      - LambdaInvokePermission4NotSameBucket
+    Properties:
+      ServiceToken: !GetAtt S3PushEventNotificationNotSameBucket.Arn
+      LambdaArn1: !GetAtt S3RestoreExpNotif.Arn
+      LambdaArn2: !GetAtt S3RestoreInitNotif.Arn
+      LambdaArn3: !GetAtt S3RestoreCompNotif.Arn
+      LambdaArn4: !GetAtt S3CopyCompNotifNotSameBucket.Arn
+      Bucket: !Ref Bucket
+      TargetBucket: !Ref TargetBucket
+      # ManifestBucket: !Ref ManifestBucket
+
+
+  DashBoardDataSource:
+    Type: AWS::QuickSight::DataSource
+    Properties:
+      Name: 'DashBoardDataSource-DataSource'
+      DataSourceId: !Join
+                    - "-"
+                    - - "DashBoardDataSource-DataSource"
+                      - !Select
+                        - 0
+                        - !Split
+                          - "-"
+                          - !Select
+                            - 2
+                            - !Split
+                              - "/"
+                              - !Ref "AWS::StackId"
+      AwsAccountId: !Ref AWS::AccountId
+      Type: ATHENA
+      DataSourceParameters:
+        AthenaParameters:
+          WorkGroup: 'primary'      
+      Permissions:
+        - Principal: !Join
+            - ''
+            - - !Sub 'arn:${AWS::Partition}:quicksight:'
+              - !Ref QuickSightIdentityRegion
+              - ':'
+              - !Ref AWS::AccountId
+              - ':user/default/'
+              - !Ref QuickSightUser
+          Actions:
+            - quicksight:UpdateDataSourcePermissions
+            - quicksight:DescribeDataSource
+            - quicksight:DescribeDataSourcePermissions
+            - quicksight:PassDataSource
+            - quicksight:UpdateDataSource
+            - quicksight:DeleteDataSource
+
+
+  RestoreCopyStatusDSNonVersioned:
+    Condition: versioning_disabled
+    Type: AWS::QuickSight::DataSet
+    Properties:
+      Name: !Sub '${Bucket}_Restore_Copy_Status_DS_Non_Versioned'
+      DataSetId: !Join
+                    - "-"
+                    - - "RestoreCopyStatusDS"
+                      - !Select
+                        - 0
+                        - !Split
+                          - "-"
+                          - !Select
+                            - 2
+                            - !Split
+                              - "/"
+                              - !Ref "AWS::StackId"
+
+
+      AwsAccountId: !Ref AWS::AccountId
+      PhysicalTableMap:
+          RestoreCopyStatusDSTableP:
+            CustomSql:
+              Columns: 
+                  - Name: restore_duration
+                    Type: DECIMAL        
+                  - Name: duration_in_std
+                    Type: DECIMAL
+                  - Name: expiration_duration
+                    Type: DECIMAL                       
+                  - Name: size
+                    Type: DECIMAL                                  
+                  - Name: bucket
+                    Type: STRING        
+                  - Name: object_key
+                    Type: STRING               
+                  - Name: restore_initiated
+                    Type: STRING        
+                  - Name: restore_init_time
+                    Type: STRING        
+                  - Name: restore_completed
+                    Type: STRING        
+                  - Name: restore_comp_time
+                    Type: STRING
+                  - Name: copy_completed
+                    Type: STRING        
+                  - Name: copy_comp_time
+                    Type: STRING                  
+                  - Name: expiration_time
+                    Type: STRING
+                  - Name: object_accessible
+                    Type: STRING
+                  - Name: object_expired
+                    Type: STRING
+
+     
+
+              DataSourceArn: !GetAtt DashBoardDataSource.Arn
+              Name: 'restore_copy_view_full' 
+              SqlQuery: !Join
+                - ''
+                - - "select * from "
+                  - "\""
+                  - !Ref DynamoDBConnectorName
+                  - "\""
+                  - ".\"default\"."
+                  - "\""
+                  - !Ref Bucket
+                  - "-"
+                  - !Select
+                    - 0
+                    - !Split
+                      - "-"
+                      - !Select
+                        - 2
+                        - !Split
+                          - "/"
+                          - !Ref "AWS::StackId"
+                  - "\""
+
+
+      LogicalTableMap:
+          RestoreCopyStatusDSTableL:
+            Alias: RestoreCopyStatusDS
+            DataTransforms:
+              -
+                CastColumnTypeOperation:
+                  ColumnName: restore_init_time
+                  NewColumnType: DATETIME            
+                  Format: "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+              -
+                CreateColumnsOperation:
+                    Columns:
+                      -
+                        ColumnName: "size_in_MB"
+                        ColumnId: "535387cd-a96b-40cc-9780-b4db868b7f4a"
+                        Expression: "size/1024/1024"
+                      - 
+                        ColumnName: "prefix"
+                        ColumnId: "535387cd-a96b-40cc-9780-b4db868b7f4b"
+                        Expression: "ifelse(locate({object_key},\"/\") = 0,\"/\",locate({object_key},\"/\") > 0,split({object_key},\"/\",1),\"others\")"
+              - ProjectOperation:
+                  ProjectedColumns:
+                  - bucket
+                  - object_key
+                  - size
+                  - size_in_MB
+                  - restore_initiated
+                  - restore_init_time
+                  - restore_completed
+                  - restore_comp_time
+                  - copy_completed
+                  - copy_comp_time
+                  - restore_duration
+                  - duration_in_std
+                  - expiration_duration
+                  - expiration_time
+                  - object_accessible
+                  - prefix
+                  - object_expired
+
+            Source:
+              PhysicalTableId: RestoreCopyStatusDSTableP
+
+
+      Permissions:
+          - Principal: !Join
+              - ''
+              - - !Sub 'arn:${AWS::Partition}:quicksight:'
+                - !Ref QuickSightIdentityRegion
+                - ':'
+                - !Ref AWS::AccountId
+                - ':user/default/'
+                - !Ref QuickSightUser
+            Actions:
+              - quicksight:UpdateDataSetPermissions
+              - quicksight:DescribeDataSet
+              - quicksight:DescribeDataSetPermissions
+              - quicksight:PassDataSet
+              - quicksight:DescribeIngestion
+              - quicksight:ListIngestions
+              - quicksight:UpdateDataSet
+              - quicksight:DeleteDataSet
+              - quicksight:CreateIngestion
+              - quicksight:CancelIngestion
+      ImportMode: DIRECT_QUERY
+
+
+  RestoreCopyStatusDSVersioned:
+    Condition: versioning_enabled
+    Type: AWS::QuickSight::DataSet
+    Properties:
+      Name: !Sub '${Bucket}_Restore_Copy_Status_DS_Versioned'
+      DataSetId: !Join
+                    - "-"
+                    - - "RestoreCopyStatusDS"
+                      - !Select
+                        - 0
+                        - !Split
+                          - "-"
+                          - !Select
+                            - 2
+                            - !Split
+                              - "/"
+                              - !Ref "AWS::StackId"
+
+
+      AwsAccountId: !Ref AWS::AccountId
+      PhysicalTableMap:
+          RestoreCopyStatusDSTableP:
+            CustomSql:
+              Columns: 
+                  - Name: restore_duration
+                    Type: DECIMAL        
+                  - Name: duration_in_std
+                    Type: DECIMAL
+                  - Name: expiration_duration
+                    Type: DECIMAL                       
+                  - Name: size
+                    Type: DECIMAL                                  
+                  - Name: bucket
+                    Type: STRING        
+                  - Name: object_key
+                    Type: STRING               
+                  - Name: restore_initiated
+                    Type: STRING        
+                  - Name: restore_init_time
+                    Type: STRING        
+                  - Name: restore_completed
+                    Type: STRING        
+                  - Name: restore_comp_time
+                    Type: STRING
+                  - Name: copy_completed
+                    Type: STRING        
+                  - Name: copy_comp_time
+                    Type: STRING                  
+                  - Name: expiration_time
+                    Type: STRING
+                  - Name: object_accessible
+                    Type: STRING
+                  - Name: versionid
+                    Type: STRING
+                  - Name: object_expired
+                    Type: STRING     
+                  - Name: new_copy
+                    Type: STRING
+
+              DataSourceArn: !GetAtt DashBoardDataSource.Arn
+              Name: 'restore_copy_view_full' 
+              SqlQuery: !Join
+                - ''
+                - - "select * from "
+                  - "\""
+                  - !Ref DynamoDBConnectorName
+                  - "\""
+                  - ".\"default\"."
+                  - "\""
+                  - !Ref Bucket
+                  - "-"
+                  - !Select
+                    - 0
+                    - !Split
+                      - "-"
+                      - !Select
+                        - 2
+                        - !Split
+                          - "/"
+                          - !Ref "AWS::StackId"
+                  - "\""
+
+      LogicalTableMap:
+          RestoreCopyStatusDSTableL:
+            Alias: RestoreCopyStatusDS
+            DataTransforms:
+              -
+                CastColumnTypeOperation:
+                  ColumnName: restore_init_time
+                  NewColumnType: DATETIME            
+                  Format: "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"               
+
+              -
+                CreateColumnsOperation:
+                    Columns:
+                      -
+                        ColumnName: "size_in_MB"
+                        ColumnId: "535387cd-a96b-40cc-9780-b4db868b7f4a"
+                        Expression: "size/1024/1024"
+                      - 
+                        ColumnName: "prefix"
+                        ColumnId: "535387cd-a96b-40cc-9780-b4db868b7f4b"
+                        Expression: "ifelse(locate({object_key},\"/\") = 0,\"/\",locate({object_key},\"/\") > 0,split({object_key},\"/\",1),\"others\")"
+              - ProjectOperation:
+                  ProjectedColumns:
+                  - bucket
+                  - object_key
+                  - size
+                  - size_in_MB
+                  - restore_initiated
+                  - restore_init_time
+                  - restore_completed
+                  - restore_comp_time
+                  - copy_completed
+                  - copy_comp_time
+                  - restore_duration
+                  - duration_in_std
+                  - expiration_duration
+                  - expiration_time
+                  - object_accessible
+                  - prefix
+                  - versionid
+                  - object_expired
+                  - new_copy
+
+            Source:
+              PhysicalTableId: RestoreCopyStatusDSTableP
+
+
+      Permissions:
+          - Principal: !Join
+              - ''
+              - - !Sub 'arn:${AWS::Partition}:quicksight:'
+                - !Ref QuickSightIdentityRegion
+                - ':'
+                - !Ref AWS::AccountId
+                - ':user/default/'
+                - !Ref QuickSightUser
+            Actions:
+              - quicksight:UpdateDataSetPermissions
+              - quicksight:DescribeDataSet
+              - quicksight:DescribeDataSetPermissions
+              - quicksight:PassDataSet
+              - quicksight:DescribeIngestion
+              - quicksight:ListIngestions
+              - quicksight:UpdateDataSet
+              - quicksight:DeleteDataSet
+              - quicksight:CreateIngestion
+              - quicksight:CancelIngestion
+      ImportMode: DIRECT_QUERY
+
+  RestoreCopyStatusQSTheme:
+    Type: AWS::QuickSight::Theme
+    Properties:
+      ThemeId: !Join
+                    - "-"
+                    - - "RestoreCopyStatus-Theme"
+                      - !Select
+                        - 0
+                        - !Split
+                          - "-"
+                          - !Select
+                            - 2
+                            - !Split
+                              - "/"
+                              - !Ref "AWS::StackId"
+      Name: 'RestoreCopyStatus-Theme'
+      AwsAccountId: !Ref AWS::AccountId
+      BaseThemeId: MIDNIGHT
+      Configuration:
+        UIColorPalette:
+          PrimaryBackground: '#103650'
+          SecondaryBackground: '#103650'      
+      Permissions:
+        - Principal: !Join
+            - ''
+            - - !Sub 'arn:${AWS::Partition}:quicksight:'
+              - !Ref QuickSightIdentityRegion
+              - ':'
+              - !Ref AWS::AccountId
+              - ':user/default/'
+              - !Ref QuickSightUser
+          Actions:
+            - quicksight:UpdateThemeAlias
+            - quicksight:ListThemeVersions
+            - quicksight:UpdateThemePermissions
+            - quicksight:DescribeThemeAlias
+            - quicksight:DeleteThemeAlias
+            - quicksight:DeleteTheme
+            - quicksight:ListThemeAliases
+            - quicksight:DescribeTheme
+            - quicksight:CreateThemeAlias
+            - quicksight:UpdateTheme
+            - quicksight:DescribeThemePermissions
+      VersionDescription: Initial version
+
+  RestoreCopyStatusTemplateNonVersioned:
+    Condition: versioning_disabled 
+    Type: AWS::QuickSight::Template
+    Properties:
+      TemplateId: !Join
+                    - "-"
+                    - - "RestoreCopyStatusTemplateNonVersioned"
+                      - !Select
+                        - 0
+                        - !Split
+                          - "-"
+                          - !Select
+                            - 2
+                            - !Split
+                              - "/"
+                              - !Ref "AWS::StackId"
+      Name: 'RestoreCopyStatusTemplateNonVersioned'
+      AwsAccountId: !Ref AWS::AccountId
+      SourceEntity:
+        SourceTemplate:
+          Arn: !Sub 'arn:${AWS::Partition}:quicksight:ap-southeast-2:858932634922:template/dashboard_template_non_versioned_v6'
+      Permissions:
+        - Principal: !Join
+            - ''
+            - - !Sub 'arn:${AWS::Partition}:quicksight:'
+              - !Ref QuickSightIdentityRegion
+              - ':'
+              - !Ref AWS::AccountId
+              - ':user/default/'
+              - !Ref QuickSightUser
+          Actions:
+            - quicksight:DescribeTemplate
+      VersionDescription: Dashboard for restore and copy status
+
+  RestoreCopyStatusTemplateVersioned:
+    Condition: versioning_enabled 
+    Type: AWS::QuickSight::Template
+    Properties:
+      TemplateId: !Join
+                    - "-"
+                    - - "RestoreCopyStatusTemplateVersioned"
+                      - !Select
+                        - 0
+                        - !Split
+                          - "-"
+                          - !Select
+                            - 2
+                            - !Split
+                              - "/"
+                              - !Ref "AWS::StackId"
+      Name: 'RestoreCopyStatusTemplateVersioned'
+      AwsAccountId: !Ref AWS::AccountId
+      SourceEntity:
+        SourceTemplate:
+          Arn: !Sub 'arn:${AWS::Partition}:quicksight:ap-southeast-2:858932634922:template/dashboard_template_versioned_v6'
+      Permissions:
+        - Principal: !Join
+            - ''
+            - - !Sub 'arn:${AWS::Partition}:quicksight:'
+              - !Ref QuickSightIdentityRegion
+              - ':'
+              - !Ref AWS::AccountId
+              - ':user/default/'
+              - !Ref QuickSightUser
+          Actions:
+            - quicksight:DescribeTemplate
+      VersionDescription: Dashboard for restore and copy status
+
+  RestoreCopyStatusAnalysisNonVersioned:
+    Condition: versioning_disabled
+    Type: AWS::QuickSight::Analysis
+    Properties:
+      Name: !Sub '${Bucket}_RestoreCopyStatusAnalysis'
+      AnalysisId: !Join
+                    - "-"
+                    - - "RestoreCopyStatusAnalysis"
+                      - !Select
+                        - 0
+                        - !Split
+                          - "-"
+                          - !Select
+                            - 2
+                            - !Split
+                              - "/"
+                              - !Ref "AWS::StackId"
+      AwsAccountId: !Ref AWS::AccountId
+      SourceEntity:
+        SourceTemplate:
+          Arn: !GetAtt RestoreCopyStatusTemplateNonVersioned.Arn
+          DataSetReferences:
+            - DataSetPlaceholder: dashboard_non_versioned_v6
+              DataSetArn: !GetAtt RestoreCopyStatusDSNonVersioned.Arn
+            
+      Permissions:
+        - Principal: !Join
+            - ''
+            - - !Sub 'arn:${AWS::Partition}:quicksight:'
+              - !Ref QuickSightIdentityRegion
+              - ':'
+              - !Ref AWS::AccountId
+              - ':user/default/'
+              - !Ref QuickSightUser
+          Actions:
+            - quicksight:RestoreAnalysis
+            - quicksight:UpdateAnalysisPermissions
+            - quicksight:DeleteAnalysis
+            - quicksight:DescribeAnalysisPermissions
+            - quicksight:QueryAnalysis
+            - quicksight:DescribeAnalysis
+            - quicksight:UpdateAnalysis
+      ThemeArn: !GetAtt RestoreCopyStatusQSTheme.Arn
+
+
+  RestoreCopyStatusAnalysisVersioned:
+    Condition: versioning_enabled
+    Type: AWS::QuickSight::Analysis
+    Properties:
+      Name: !Sub '${Bucket}_RestoreCopyStatusAnalysis'
+      AnalysisId: !Join
+                    - "-"
+                    - - "RestoreCopyStatusAnalysis"
+                      - !Select
+                        - 0
+                        - !Split
+                          - "-"
+                          - !Select
+                            - 2
+                            - !Split
+                              - "/"
+                              - !Ref "AWS::StackId"
+      AwsAccountId: !Ref AWS::AccountId
+      SourceEntity:
+        SourceTemplate:
+          Arn: !GetAtt RestoreCopyStatusTemplateVersioned.Arn
+          DataSetReferences:
+            - DataSetPlaceholder: dashboard_versioned_v6
+              DataSetArn: !GetAtt RestoreCopyStatusDSVersioned.Arn
+            
+      Permissions:
+        - Principal: !Join
+            - ''
+            - - !Sub 'arn:${AWS::Partition}:quicksight:'
+              - !Ref QuickSightIdentityRegion
+              - ':'
+              - !Ref AWS::AccountId
+              - ':user/default/'
+              - !Ref QuickSightUser
+          Actions:
+            - quicksight:RestoreAnalysis
+            - quicksight:UpdateAnalysisPermissions
+            - quicksight:DeleteAnalysis
+            - quicksight:DescribeAnalysisPermissions
+            - quicksight:QueryAnalysis
+            - quicksight:DescribeAnalysis
+            - quicksight:UpdateAnalysis
+      ThemeArn: !GetAtt RestoreCopyStatusQSTheme.Arn
+
+
+  RestoreCopyStatusDashboardNonVersioned:
+    Condition: versioning_disabled    
+    Type: AWS::QuickSight::Dashboard
+    Properties:
+      Name: !Sub '${Bucket}_RestoreCopyStatusDashboard'
+      DashboardId: !Join
+                    - "-"
+                    - - "RestoreCopyStatusDashboardNonVersioned"
+                      - !Select
+                        - 0
+                        - !Split
+                          - "-"
+                          - !Select
+                            - 2
+                            - !Split
+                              - "/"
+                              - !Ref "AWS::StackId"
+      AwsAccountId: !Ref AWS::AccountId
+      SourceEntity:
+        SourceTemplate:
+          Arn: !GetAtt RestoreCopyStatusTemplateNonVersioned.Arn
+          DataSetReferences:
+            - DataSetPlaceholder: dashboard_non_versioned_v6
+              DataSetArn: !GetAtt RestoreCopyStatusDSNonVersioned.Arn
+
+      Permissions:
+        - Principal: !Join
+            - ''
+            - - !Sub 'arn:${AWS::Partition}:quicksight:'
+              - !Ref QuickSightIdentityRegion
+              - ':'
+              - !Ref AWS::AccountId
+              - ':user/default/'
+              - !Ref QuickSightUser
+          Actions:
+            - quicksight:DescribeDashboard
+            - quicksight:ListDashboardVersions
+            - quicksight:UpdateDashboardPermissions
+            - quicksight:QueryDashboard
+            - quicksight:UpdateDashboard
+            - quicksight:DeleteDashboard
+            - quicksight:DescribeDashboardPermissions
+            - quicksight:UpdateDashboardPublishedVersion
+      ThemeArn: !GetAtt RestoreCopyStatusQSTheme.Arn
+      DashboardPublishOptions:
+        AdHocFilteringOption:
+          AvailabilityStatus: DISABLED
+
+  RestoreCopyStatusDashboardVersioned:
+    Condition: versioning_enabled
+    Type: AWS::QuickSight::Dashboard
+    Properties:
+      Name: !Sub '${Bucket}_RestoreCopyStatusDashboard'
+      DashboardId: !Join
+                    - "-"
+                    - - "RestoreCopyStatusDashboardVersioned"
+                      - !Select
+                        - 0
+                        - !Split
+                          - "-"
+                          - !Select
+                            - 2
+                            - !Split
+                              - "/"
+                              - !Ref "AWS::StackId"
+      AwsAccountId: !Ref AWS::AccountId
+      SourceEntity:
+        SourceTemplate:
+          Arn: !GetAtt RestoreCopyStatusTemplateVersioned.Arn
+          DataSetReferences:
+            - DataSetPlaceholder: dashboard_versioned_v6
+              DataSetArn: !GetAtt RestoreCopyStatusDSVersioned.Arn
+
+      Permissions:
+        - Principal: !Join
+            - ''
+            - - !Sub 'arn:${AWS::Partition}:quicksight:'
+              - !Ref QuickSightIdentityRegion
+              - ':'
+              - !Ref AWS::AccountId
+              - ':user/default/'
+              - !Ref QuickSightUser
+          Actions:
+            - quicksight:DescribeDashboard
+            - quicksight:ListDashboardVersions
+            - quicksight:UpdateDashboardPermissions
+            - quicksight:QueryDashboard
+            - quicksight:UpdateDashboard
+            - quicksight:DeleteDashboard
+            - quicksight:DescribeDashboardPermissions
+            - quicksight:UpdateDashboardPublishedVersion
+      ThemeArn: !GetAtt RestoreCopyStatusQSTheme.Arn
+      DashboardPublishOptions:
+        AdHocFilteringOption:
+          AvailabilityStatus: DISABLED
