@@ -55,10 +55,10 @@ The duration of the objects being in the temporary storage area provides an indi
 1.	QuickSight subscription
 2.	Athena DynamoDB Connector
 3.	A S3 bucket for data that exceeds Lambda function limits
-4.	S3 Event Notifications for Restore/Copy operations are currently not part of an existing workload
+4.	S3 Event Notifications for Restore/Copy operations are currently not part of an existing workload. Otherwise, choose the Amazon EventBridge option
 
 ### Limitation
-The solution has been tested with AWS resources in the same account and region.
+The solution has been tested with all AWS resources in the same account and in same region.
 
 ### Deployment
 #### 1.	Follow the steps to create a data source in Athena for DynamoDB
