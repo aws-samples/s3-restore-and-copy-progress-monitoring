@@ -17,6 +17,7 @@ Monitoring Glacier restore and copy progress using S3 Event Notification, Dynamo
 
 - S3 Inventory
 - S3 Event Notification
+- Amazon EventBridge
 - Amazon DynamoDB
 - AWS Lambda
 - Amazon Athena
@@ -27,7 +28,7 @@ Monitoring Glacier restore and copy progress using S3 Event Notification, Dynamo
 
 1.	Upload a manifest file that contains all the objects in the restoration and/or copy scope to the designated S3 bucket
 2.	Leverage Amazon DynamoDB import from S3 to ingest the manifest file to an Amazon DynamoDB table
-3.	Leverage Amazon Lambda to update the Amazon DynamoDB table when receives S3 Event Notification for restore initiation, restore completion and copy completion events
+3.	Leverage Amazon Lambda to update the Amazon DynamoDB table when receives S3 Event Notifications or Amazon EventBridge events for restore initiation, restore completion and copy completion events
 4.	Visualise the restore and/or copy progress with Amazon Athena and Amazon QuickSight
 
 ### Solution benefit
