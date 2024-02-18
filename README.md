@@ -1,4 +1,4 @@
-# Monitoring restore and migration progress at scale 
+# Monitoring S3 restore and migration progress at scale 
 
 The Amazon S3 Glacier storage classes are purpose-built for data archiving, providing you with the highest performance and retrieval flexibility, as well as the lowest cost archive storage in the cloud.
 
